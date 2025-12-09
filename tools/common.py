@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-Generate an image using a workflow embedded in a PNG and a provided CLIP text prompt.
-
-Usage:
-  python tools/generate_from_png.py --png /path/to/input.png --prompt "a cat" [--out out.png] [--show] [--host http://127.0.0.1:8188]
-
-Requirements:
-  - ComfyUI server running with the API enabled.
-  - Python packages: requests, pillow
-"""
-
-import argparse
 import json
 import signal
 import sys
@@ -32,10 +19,8 @@ def load_workflow_from_png(png_path: Path) -> dict:
         data = json.loads(raw)
     except Exception as e:
         raise RuntimeError(f"Workflow metadata is not valid JSON: {e}") from e
-    # Prefer direct prompt mapping if present
     if isinstance(data, dict) and "prompt" in data and isinstance(data["prompt"], dict):
         return data["prompt"]
-    # Some embeds store the workflow inside a wrapper
     if isinstance(data, dict) and "nodes" not in data and "workflow" in data:
         data = data["workflow"]
     if isinstance(data, dict) and "nodes" in data:
@@ -46,7 +31,6 @@ def load_workflow_from_png(png_path: Path) -> dict:
 
 
 def set_clip_texts(workflow: dict, prompt_text: str) -> dict:
-    # Update all CLIPTextEncode nodes to the given prompt text.
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
@@ -61,7 +45,6 @@ def set_clip_texts(workflow: dict, prompt_text: str) -> dict:
 
 
 def set_seed(workflow: dict, seed):
-    """Set seed on KSampler nodes. seed==0 => random, 'fixed' => keep, else override."""
     if seed == "fixed":
         return workflow
     import random
@@ -83,7 +66,6 @@ def set_seed(workflow: dict, seed):
 def replace_embed_with_preview(workflow: dict, enable: bool):
     if enable:
         return workflow
-    # Replace PromptWorkflowEmbedder with PreviewImage to avoid saving to output
     for node in workflow.values():
         if not isinstance(node, dict):
             continue
@@ -163,7 +145,6 @@ def download_image(host: str, result: dict, out_path: Path):
 def cancel_prompt(host: str, prompt_id: str):
     errors = []
     payload = {"prompt_id": prompt_id}
-    # Preferred: interrupt with prompt_id
     for endpoint in ("/api/interrupt", "/interrupt"):
         url = urljoin(host if host.endswith("/") else host + "/", endpoint.lstrip("/"))
         try:
@@ -173,7 +154,6 @@ def cancel_prompt(host: str, prompt_id: str):
             return True
         except Exception as e:
             errors.append((endpoint, str(e)))
-    # Queue cancel endpoints
     for endpoint in ("/api/cancel", "/prompt_cancel", "/api/queue/cancel", "/queue/cancel"):
         url = urljoin(host if host.endswith("/") else host + "/", endpoint.lstrip("/"))
         try:
@@ -188,15 +168,11 @@ def cancel_prompt(host: str, prompt_id: str):
 
 
 def convert_workflow_to_prompt(workflow: dict) -> dict:
-    """
-    Convert workflow JSON (as stored in PNG metadata) to a prompt mapping for the API.
-    """
     prompt = {}
     nodes = workflow.get("nodes", [])
     links = workflow.get("links", [])
     link_lookup = {}
     for link in links:
-        # link format: [id, start_node, start_slot, end_node, end_slot, type]
         if len(link) < 5:
             continue
         _, start, start_slot, end, end_slot = link[:5]
@@ -229,24 +205,12 @@ def convert_workflow_to_prompt(workflow: dict) -> dict:
     return prompt
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate using workflow embedded in a PNG.")
-    parser.add_argument("--png", required=True, type=Path, help="Path to PNG with workflow metadata.")
-    parser.add_argument("--prompt", required=True, help="CLIP text prompt to inject.")
-    parser.add_argument("--out", type=Path, default=None, help="Output PNG path (default image_<timestamp>.png).")
-    parser.add_argument("--host", default="http://127.0.0.1:8188", help="ComfyUI API host.")
-    parser.add_argument("--show", action="store_true", help="Display the resulting image after generation.")
-    parser.add_argument("--debug", action="store_true", help="Print request payload before sending.")
-    parser.add_argument("--seed", default=0, help="Seed value for KSampler (0=random, fixed=keep original, number=override).")
-    parser.add_argument("--save-output", action="store_true", help="Save via embedder (default false uses preview only).")
-    args = parser.parse_args()
-
-    state = {"prompt_id": None}
+def register_signal_handlers(host, state):
     def handle_signal(signum, frame):
         print(f"[signal] Caught signal {signum}, attempting cancel")
         pid = state.get("prompt_id")
         if pid:
-            cancel_prompt(args.host, pid)
+            cancel_prompt(host, pid)
         sys.exit(1)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -254,47 +218,3 @@ def main():
             signal.signal(sig, handle_signal)
         except Exception:
             pass
-
-    try:
-        workflow = load_workflow_from_png(args.png)
-        workflow = set_clip_texts(workflow, args.prompt)
-        try:
-            seed_val = int(args.seed)
-        except ValueError:
-            seed_val = args.seed
-        workflow = set_seed(workflow, seed_val)
-        workflow = replace_embed_with_preview(workflow, enable=args.save_output)
-
-        if args.debug:
-            print("Submitting workflow:")
-            print(json.dumps(workflow, indent=2))
-
-        state["prompt_id"] = queue_prompt(args.host, workflow)
-        result = wait_for_result(args.host, state["prompt_id"])
-        if args.out is None:
-            ts = int(time.time())
-            out_path = Path(f"image_{ts}.png")
-        else:
-            out_path = args.out
-        out_path = download_image(args.host, result, out_path)
-
-        if args.show:
-            img = Image.open(out_path)
-            img.show()
-        else:
-            print(f"Saved: {out_path.resolve()}")
-        print(f"Prompt ID: {state['prompt_id']}")
-    except KeyboardInterrupt:
-        pid = state.get("prompt_id")
-        if pid:
-            cancel_prompt(args.host, pid)
-        raise
-    except Exception:
-        pid = state.get("prompt_id")
-        if pid:
-            cancel_prompt(args.host, pid)
-        raise
-
-
-if __name__ == "__main__":
-    main()
