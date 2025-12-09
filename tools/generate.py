@@ -163,13 +163,27 @@ def download_image(host: str, result: dict, out_path: Path):
 def cancel_prompt(host: str, prompt_id: str):
     errors = []
     payload = {"prompt_id": prompt_id}
-    for endpoint in ("/api/cancel", "/prompt_cancel"):
+    # Preferred: interrupt with prompt_id
+    for endpoint in ("/api/interrupt", "/interrupt"):
         url = urljoin(host if host.endswith("/") else host + "/", endpoint.lstrip("/"))
         try:
-            requests.post(url, json=payload, timeout=5)
+            print(f"[cancel] POST {url} (interrupt) for {prompt_id}")
+            resp = requests.post(url, json=payload, timeout=5)
+            print(resp.content)
             return True
         except Exception as e:
             errors.append((endpoint, str(e)))
+    # Queue cancel endpoints
+    for endpoint in ("/api/cancel", "/prompt_cancel", "/api/queue/cancel", "/queue/cancel"):
+        url = urljoin(host if host.endswith("/") else host + "/", endpoint.lstrip("/"))
+        try:
+            print(f"[cancel] POST {url} for prompt {prompt_id}")
+            resp = requests.post(url, json=payload, timeout=5)
+            print(resp.content)
+            return True
+        except Exception as e:
+            errors.append((endpoint, str(e)))
+    print(f"Failed to cancel prompt: {errors}")
     return False
 
 
@@ -227,11 +241,12 @@ def main():
     parser.add_argument("--save-output", action="store_true", help="Save via embedder (default false uses preview only).")
     args = parser.parse_args()
 
-    prompt_id = None
-
+    state = {"prompt_id": None}
     def handle_signal(signum, frame):
-        if prompt_id:
-            cancel_prompt(args.host, prompt_id)
+        print(f"[signal] Caught signal {signum}, attempting cancel")
+        pid = state.get("prompt_id")
+        if pid:
+            cancel_prompt(args.host, pid)
         sys.exit(1)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -254,8 +269,8 @@ def main():
             print("Submitting workflow:")
             print(json.dumps(workflow, indent=2))
 
-        prompt_id = queue_prompt(args.host, workflow)
-        result = wait_for_result(args.host, prompt_id)
+        state["prompt_id"] = queue_prompt(args.host, workflow)
+        result = wait_for_result(args.host, state["prompt_id"])
         if args.out is None:
             ts = int(time.time())
             out_path = Path(f"image_{ts}.png")
@@ -268,14 +283,16 @@ def main():
             img.show()
         else:
             print(f"Saved: {out_path.resolve()}")
-        print(f"Prompt ID: {prompt_id}")
+        print(f"Prompt ID: {state['prompt_id']}")
     except KeyboardInterrupt:
-        if prompt_id:
-            cancel_prompt(args.host, prompt_id)
+        pid = state.get("prompt_id")
+        if pid:
+            cancel_prompt(args.host, pid)
         raise
     except Exception:
-        if prompt_id:
-            cancel_prompt(args.host, prompt_id)
+        pid = state.get("prompt_id")
+        if pid:
+            cancel_prompt(args.host, pid)
         raise
 
 
