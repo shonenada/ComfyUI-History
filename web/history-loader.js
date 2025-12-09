@@ -52,6 +52,30 @@ async function saveNow(options = {}) {
     return data.path || data.saved;
 }
 
+function parsePngTexts(uint8) {
+    const texts = {};
+    let offset = 8; // skip signature
+    const readUint32 = (pos) => (uint8[pos] << 24) | (uint8[pos + 1] << 16) | (uint8[pos + 2] << 8) | uint8[pos + 3];
+    while (offset + 8 <= uint8.length) {
+        const length = readUint32(offset);
+        const type = String.fromCharCode(uint8[offset + 4], uint8[offset + 5], uint8[offset + 6], uint8[offset + 7]);
+        const dataStart = offset + 8;
+        const dataEnd = dataStart + length;
+        if (dataEnd > uint8.length) break;
+        if (type === "tEXt") {
+            const data = uint8.slice(dataStart, dataEnd);
+            const nullIdx = data.indexOf(0);
+            if (nullIdx >= 0) {
+                const keyword = new TextDecoder().decode(data.slice(0, nullIdx));
+                const text = new TextDecoder().decode(data.slice(nullIdx + 1));
+                texts[keyword] = text;
+            }
+        }
+        offset = dataEnd + 4; // skip CRC
+    }
+    return texts;
+}
+
 function createFilePicker({ accept = ".png", multiple = false, onFiles }) {
     const input = document.createElement("input");
     input.type = "file";
@@ -73,36 +97,18 @@ function readPngWorkflow(file, { which = "workflow" } = {}) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
-            import("/scripts/png.js")
-                .then((mod) => {
-                    try {
-                        const arr = new Uint8Array(reader.result);
-                        const chunks = mod.parseChunks(arr);
-                        const texts = {};
-                        for (const chunk of chunks) {
-                            if (chunk.name === "tEXt") {
-                                const txt = mod.decodeTextChunk(chunk.data);
-                                texts[txt.keyword] = txt.text;
-                            } else if (chunk.name === "zTXt") {
-                                try {
-                                    const txt = mod.decodeZtextChunk(chunk.data);
-                                    texts[txt.keyword] = txt.text;
-                                } catch (err) {
-                                    console.warn("[HistoryLoader] failed to decode zTXt", err);
-                                }
-                            }
-                        }
-                        const key = which === "prompt" ? "prompt" : "workflow";
-                        if (!(key in texts)) {
-                            reject(new Error(`No '${key}' metadata found in PNG.`));
-                            return;
-                        }
-                        resolve(texts[key]);
-                    } catch (err) {
-                        reject(err);
-                    }
-                })
-                .catch(reject);
+            try {
+                const arr = new Uint8Array(reader.result);
+                const texts = parsePngTexts(arr);
+                const key = which === "prompt" ? "prompt" : "workflow";
+                if (!(key in texts)) {
+                    reject(new Error(`No '${key}' metadata found in PNG.`));
+                    return;
+                }
+                resolve(texts[key]);
+            } catch (err) {
+                reject(err);
+            }
         };
         reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
         reader.readAsArrayBuffer(file);
@@ -145,51 +151,92 @@ async function loadWorkflowFromRemotePng() {
             alert("No PNG files found in output.");
             return;
         }
-        const options = files.map((f) => `${f.path || f.name} (${Math.round(f.size / 1024)} KB)`);
-        const choice = prompt("Select file index:\n" + options.map((o, i) => `${i}: ${o}`).join("\n"));
-        if (choice === null) return;
-        const idx = parseInt(choice, 10);
-        if (Number.isNaN(idx) || idx < 0 || idx >= files.length) {
-            alert("Invalid selection.");
-            return;
-        }
-        const relPath = files[idx].path || files[idx].name;
-        const imgResp = await api.fetchApi(`/history/output_images/${encodeURIComponent(relPath)}`);
-        if (!imgResp.ok) {
-            const text = await imgResp.text();
-            throw new Error(text || `Failed to fetch image (${imgResp.status})`);
-        }
-        const blob = await imgResp.blob();
-        const arrBuf = await blob.arrayBuffer();
-        const arr = new Uint8Array(arrBuf);
-        const mod = await import("/scripts/png.js");
-        const chunks = mod.parseChunks(arr);
-        const texts = {};
-        for (const chunk of chunks) {
-            if (chunk.name === "tEXt") {
-                const txt = mod.decodeTextChunk(chunk.data);
-                texts[txt.keyword] = txt.text;
-            } else if (chunk.name === "zTXt") {
-                try {
-                    const txt = mod.decodeZtextChunk(chunk.data);
-                    texts[txt.keyword] = txt.text;
-                } catch (err) {
-                    console.warn("[HistoryLoader] zTXt decode failed", err);
-                }
-            }
-        }
-        const raw = texts.workflow;
-        if (!raw) {
-            throw new Error("No 'workflow' metadata found in PNG.");
-        }
-        let parsed;
-        try {
-            parsed = JSON.parse(raw);
-        } catch {
-            throw new Error("Workflow metadata is not valid JSON.");
-        }
-        await app.loadGraphData(parsed);
-        console.log("[HistoryLoader] loaded workflow from remote PNG", name);
+        const chooser = new ComfyDialog();
+        chooser.element.style.width = "480px";
+        chooser.element.style.padding = "16px";
+        chooser.element.style.color = "var(--fg-color)";
+
+    const list = $el(
+        "select",
+        {
+            size: Math.min(14, files.length),
+            style: {
+                width: "100%",
+                boxSizing: "border-box",
+                backgroundColor: "var(--comfy-input-bg)",
+                color: "var(--fg-color)",
+                marginBottom: "12px",
+            },
+        },
+        files.map((f, idx) =>
+            $el("option", { value: idx }, `${f.path || f.name} (${Math.round(f.size / 1024)} KB)`)
+        )
+    );
+
+        const status = $el("div", { style: { minHeight: "18px", color: "var(--fg-color-muted)", marginBottom: "12px" } });
+
+        const loadBtn = $el(
+            "button",
+            {
+                textContent: "Load",
+                onclick: async () => {
+                    const idx = parseInt(list.value, 10);
+                    if (Number.isNaN(idx) || idx < 0 || idx >= files.length) {
+                        status.textContent = "Invalid selection.";
+                        return;
+                    }
+                    const relPath = files[idx].path || files[idx].name;
+                    status.textContent = "Fetching PNG...";
+                    try {
+                        const imgResp = await api.fetchApi(`/history/output_images/${encodeURIComponent(relPath)}`);
+                        if (!imgResp.ok) {
+                            const text = await imgResp.text();
+                            throw new Error(text || `Failed to fetch image (${imgResp.status})`);
+                        }
+                        const blob = await imgResp.blob();
+                        const arrBuf = await blob.arrayBuffer();
+                        const arr = new Uint8Array(arrBuf);
+                        const texts = parsePngTexts(arr);
+                        const raw = texts.workflow;
+                        if (!raw) {
+                            throw new Error("No 'workflow' metadata found in PNG.");
+                        }
+                        let parsed;
+                        try {
+                            parsed = JSON.parse(raw);
+                        } catch {
+                            throw new Error("Workflow metadata is not valid JSON.");
+                        }
+                        await app.loadGraphData(parsed);
+                        console.log("[HistoryLoader] loaded workflow from remote PNG", relPath);
+                        chooser.close();
+                    } catch (err) {
+                        console.error("[HistoryLoader] failed loading workflow from remote PNG", err);
+                        status.textContent = err.message;
+                    }
+                },
+            },
+            []
+        );
+
+        const closeBtn = $el(
+            "button",
+            {
+                textContent: "Close",
+                onclick: () => chooser.close(),
+            },
+            []
+        );
+
+        chooser.element.replaceChildren(
+            $el("div", {}, [
+                $el("div", { style: { marginBottom: "8px" } }, "Select a PNG from output:"),
+                list,
+                status,
+                $el("div", {}, [loadBtn, closeBtn]),
+            ])
+        );
+        chooser.show();
     } catch (err) {
         console.error("[HistoryLoader] failed loading workflow from remote PNG", err);
         alert(`Load failed: ${err.message}`);
