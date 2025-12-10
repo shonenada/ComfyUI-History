@@ -95,10 +95,13 @@ def command_info(args):
     else:
         prompt_map = data
     pos, neg, steps, ckpt = _info_from_prompt(prompt_map)
-    print(f"Positive Prompt: {pos}")
-    print(f"Negative Prompt: {neg}")
-    print(f"Steps: {steps}")
-    print(f"Checkpoint: {ckpt}")
+    GREEN = "\033[92m"
+    CYAN = "\033[96m"
+    RESET = "\033[0m"
+    print(f"{GREEN}Positive Prompt:{RESET} {pos}")
+    print(f"{CYAN}Negative Prompt:{RESET} {neg}")
+    print(f"{GREEN}Steps:{RESET} {steps}")
+    print(f"{GREEN}Checkpoint:{RESET} {ckpt}")
 
 
 def main():
