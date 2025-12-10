@@ -60,7 +60,8 @@ def command_regen(args):
 
 
 def _info_from_prompt(prompt_map: dict):
-    text = None
+    positive = None
+    negative = None
     steps = None
     checkpoint = None
     for node in prompt_map.values():
@@ -68,15 +69,23 @@ def _info_from_prompt(prompt_map: dict):
             continue
         ctype = node.get("class_type")
         inputs = node.get("inputs") or {}
-        if ctype in {"CLIPTextEncode", "CLIPTextEncodeSDXL"} and text is None:
-            text = inputs.get("text")
+        if ctype in {"CLIPTextEncode", "CLIPTextEncodeSDXL"}:
+            title = node.get("_meta", {}).get("title") or node.get("title", "")
+            text_val = inputs.get("text")
+            # heuristic: negative prompt node often has "Negative" in title
+            if title and "Negative" in title and negative is None:
+                negative = text_val
+            elif positive is None:
+                positive = text_val
+            elif negative is None:
+                negative = text_val
         if ctype == "KSampler" and steps is None:
             steps = inputs.get("steps")
         if ctype in {"CheckpointLoaderSimple", "CheckpointLoader", "CheckpointLoaderWithModel"} and checkpoint is None:
             checkpoint = inputs.get("ckpt_name")
         if ctype in {"UnetLoaderGGUF"} and checkpoint is None:
             checkpoint = inputs.get("unet_name")
-    return text, steps, checkpoint
+    return positive, negative, steps, checkpoint
 
 
 def command_info(args):
@@ -85,8 +94,9 @@ def command_info(args):
         prompt_map = convert_workflow_to_prompt(data)
     else:
         prompt_map = data
-    text, steps, ckpt = _info_from_prompt(prompt_map)
-    print(f"Prompt: {text}")
+    pos, neg, steps, ckpt = _info_from_prompt(prompt_map)
+    print(f"Positive Prompt: {pos}")
+    print(f"Negative Prompt: {neg}")
     print(f"Steps: {steps}")
     print(f"Checkpoint: {ckpt}")
 
